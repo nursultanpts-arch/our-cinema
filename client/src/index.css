@@ -1,0 +1,22 @@
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  font-family: "DM Sans", sans-serif;
+  background: #0b0b0d;
+  color: #f5f3f0;
+}
+
+button,
+input {
+  font-family: inherit;
+}

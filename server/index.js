@@ -1,4 +1,3 @@
-
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -15,6 +14,7 @@ const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DATA_DIR = path.join(__dirname, "data");
 const LIBRARY_FILE = path.join(DATA_DIR, "library.json");
 const MAX_VIDEO_SIZE = 2 * 1024 * 1024 * 1024;
+const ROOM_RECONNECT_GRACE_MS = 2 * 60 * 1000;
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -81,6 +81,7 @@ const io = new Server(server, {
 });
 
 const rooms = new Map();
+const emptyRoomTimeouts = new Map();
 
 function generateRoomCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -92,6 +93,11 @@ function cleanName(value) {
   return name || "Гость";
 }
 
+function cleanOwnerToken(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, 128);
+}
+
 function getSocketRoom(socket) {
   return [...socket.rooms].find((room) => room !== socket.id);
 }
@@ -99,6 +105,16 @@ function getSocketRoom(socket) {
 function sendRoomUsers(roomCode) {
   const room = rooms.get(roomCode);
   if (room) io.to(roomCode).emit("room-users-updated", room.users);
+}
+
+function cancelRoomDeletion(roomCode) {
+  const timeout = emptyRoomTimeouts.get(roomCode);
+  if (timeout) clearTimeout(timeout);
+  emptyRoomTimeouts.delete(roomCode);
+}
+
+function isRoomOwner(socket, room) {
+  return Boolean(room && room.ownerId === socket.id);
 }
 
 app.get("/", (req, res) => {
@@ -120,7 +136,6 @@ app.post("/api/videos", (req, res) => {
       const message = error.code === "LIMIT_FILE_SIZE"
         ? "Файл слишком большой. Максимальный размер — 2 ГБ."
         : error.message || "Не удалось загрузить файл.";
-
       return res.status(400).json({ message });
     }
 
@@ -129,7 +144,6 @@ app.post("/api/videos", (req, res) => {
     }
 
     const videos = readLibrary();
-
     const video = {
       id: crypto.randomUUID(),
       name: path.basename(req.file.originalname).slice(0, 180),
@@ -140,14 +154,11 @@ app.post("/api/videos", (req, res) => {
 
     videos.push(video);
     saveLibrary(videos);
-
     io.emit("library-updated");
-
     res.status(201).json({ video: publicVideo(video) });
   });
 });
 
-// Удаление видео из библиотеки и с диска сервера
 app.delete("/api/videos/:id", (req, res) => {
   const videoId = req.params.id;
   const videos = readLibrary();
@@ -160,31 +171,21 @@ app.delete("/api/videos/:id", (req, res) => {
   const filePath = path.join(UPLOAD_DIR, path.basename(video.filename));
 
   try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
     const updatedVideos = videos.filter((item) => item.id !== videoId);
     saveLibrary(updatedVideos);
 
-    // Если удалённое видео сейчас выбрано в комнате,
-    // очищаем его у всех участников.
     for (const [roomCode, room] of rooms.entries()) {
       if (room.currentVideo?.id === videoId) {
         room.currentVideo = null;
-        room.playback = {
-          isPlaying: false,
-          currentTime: 0,
-          episode: 1
-        };
-
+        room.playback = { isPlaying: false, currentTime: 0 };
         io.to(roomCode).emit("video-selected", null);
         io.to(roomCode).emit("playback-update", room.playback);
       }
     }
 
     io.emit("library-updated");
-
     res.json({ success: true, message: "Видео успешно удалено." });
   } catch (error) {
     console.error("Ошибка удаления видео:", error);
@@ -197,15 +198,26 @@ io.on("connection", (socket) => {
 
   socket.on("create-room", (data, callback) => {
     const name = cleanName(data?.name);
-    let roomCode;
+    const ownerToken = cleanOwnerToken(data?.ownerToken);
 
+    if (!ownerToken) {
+      if (typeof callback === "function") {
+        callback({ success: false, message: "Не удалось подтвердить создателя комнаты." });
+      }
+      return;
+    }
+
+    let roomCode;
     do roomCode = generateRoomCode();
     while (rooms.has(roomCode));
 
     const room = {
+      ownerId: socket.id,
+      ownerToken,
       users: [{ id: socket.id, name }],
-      playback: { isPlaying: false, currentTime: 0, episode: 1 },
-      currentVideo: null
+      playback: { isPlaying: false, currentTime: 0 },
+      currentVideo: null,
+      messages: []
     };
 
     rooms.set(roomCode, room);
@@ -216,7 +228,10 @@ io.on("connection", (socket) => {
         success: true,
         roomCode,
         users: room.users,
-        currentVideo: room.currentVideo
+        currentVideo: room.currentVideo,
+        playback: room.playback,
+        messages: room.messages,
+        isOwner: true
       });
     }
 
@@ -235,7 +250,14 @@ io.on("connection", (socket) => {
       return;
     }
 
+    cancelRoomDeletion(code);
+
     const name = cleanName(data?.name);
+    const suppliedOwnerToken = cleanOwnerToken(data?.ownerToken);
+
+    if (suppliedOwnerToken && suppliedOwnerToken === room.ownerToken) {
+      room.ownerId = socket.id;
+    }
 
     if (!room.users.some((user) => user.id === socket.id)) {
       room.users.push({ id: socket.id, name });
@@ -249,7 +271,9 @@ io.on("connection", (socket) => {
         roomCode: code,
         playback: room.playback,
         users: room.users,
-        currentVideo: room.currentVideo
+        currentVideo: room.currentVideo,
+        messages: room.messages || [],
+        isOwner: isRoomOwner(socket, room)
       });
     }
 
@@ -259,10 +283,18 @@ io.on("connection", (socket) => {
 
   socket.on("select-video", (videoId, callback) => {
     const roomCode = getSocketRoom(socket);
+    const room = roomCode ? rooms.get(roomCode) : null;
 
-    if (!roomCode || !rooms.has(roomCode)) {
+    if (!room) {
       if (typeof callback === "function") {
         callback({ success: false, message: "Сначала войди в комнату." });
+      }
+      return;
+    }
+
+    if (!isRoomOwner(socket, room)) {
+      if (typeof callback === "function") {
+        callback({ success: false, message: "Выбирать видео может только создатель комнаты." });
       }
       return;
     }
@@ -276,9 +308,8 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const room = rooms.get(roomCode);
     room.currentVideo = publicVideo(video);
-    room.playback = { isPlaying: false, currentTime: 0, episode: 1 };
+    room.playback = { isPlaying: false, currentTime: 0 };
 
     io.to(roomCode).emit("video-selected", room.currentVideo);
     io.to(roomCode).emit("playback-update", room.playback);
@@ -290,48 +321,74 @@ io.on("connection", (socket) => {
 
   socket.on("playback-update", (data) => {
     const roomCode = getSocketRoom(socket);
+    const room = roomCode ? rooms.get(roomCode) : null;
 
-    if (!roomCode || !rooms.has(roomCode) || !data || typeof data !== "object") {
+    if (!room || !isRoomOwner(socket, room) || !data || typeof data !== "object") {
       return;
     }
 
-    const room = rooms.get(roomCode);
-    room.playback = { ...room.playback, ...data };
+    const nextPlayback = { ...room.playback };
 
+    if (typeof data.isPlaying === "boolean") {
+      nextPlayback.isPlaying = data.isPlaying;
+    }
+
+    if (typeof data.currentTime === "number" && Number.isFinite(data.currentTime)) {
+      nextPlayback.currentTime = Math.max(0, data.currentTime);
+    }
+
+    room.playback = nextPlayback;
     socket.to(roomCode).emit("playback-update", room.playback);
   });
 
   socket.on("chat-message", (message) => {
     const roomCode = getSocketRoom(socket);
-
-    if (!roomCode || !rooms.has(roomCode) || typeof message !== "string") {
-      return;
-    }
+    if (!roomCode || !rooms.has(roomCode) || typeof message !== "string") return;
 
     const cleanMessage = message.trim().slice(0, 500);
-
     if (!cleanMessage) return;
 
     const room = rooms.get(roomCode);
     const user = room.users.find((item) => item.id === socket.id);
 
-    io.to(roomCode).emit("chat-message", {
+    const chatMessage = {
       userId: socket.id,
       name: user?.name || "Гость",
       message: cleanMessage,
       time: new Date().toISOString()
-    });
+    };
+
+    room.messages = room.messages || [];
+    room.messages.push(chatMessage);
+
+    if (room.messages.length > 100) {
+      room.messages = room.messages.slice(-100);
+    }
+
+    io.to(roomCode).emit("chat-message", chatMessage);
   });
 
   socket.on("disconnect", () => {
     for (const [roomCode, room] of rooms.entries()) {
       const previousLength = room.users.length;
-
       room.users = room.users.filter((user) => user.id !== socket.id);
 
       if (room.users.length !== previousLength) {
         if (room.users.length === 0) {
-          rooms.delete(roomCode);
+          cancelRoomDeletion(roomCode);
+
+          const timeout = setTimeout(() => {
+            const currentRoom = rooms.get(roomCode);
+
+            if (currentRoom && currentRoom.users.length === 0) {
+              rooms.delete(roomCode);
+              console.log(`Комната ${roomCode} удалена после ожидания повторного входа.`);
+            }
+
+            emptyRoomTimeouts.delete(roomCode);
+          }, ROOM_RECONNECT_GRACE_MS);
+
+          emptyRoomTimeouts.set(roomCode, timeout);
         } else {
           sendRoomUsers(roomCode);
         }

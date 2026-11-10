@@ -5,12 +5,162 @@ import "./App.css";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://192.168.0.101:3001";
 
+function getVideoPalette(value = "video") {
+  const palettes = [
+    ["#33251f", "#9a6846"],
+    ["#1c2b35", "#456d7b"],
+    ["#30243b", "#76548c"],
+    ["#25352c", "#527c5d"],
+    ["#3b252c", "#965363"],
+    ["#292d3d", "#596b9b"]
+  ];
+
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+
+  return palettes[hash % palettes.length];
+}
+
+function VideoCard({ video, onSelect, onDelete, selected = false, compact = false }) {
+  const [dark, light] = getVideoPalette(video.id || video.name || "video");
+
+  const cardStyle = {
+    minWidth: 0,
+    overflow: "hidden",
+    border: selected ? "1px solid #bd936b" : "1px solid rgba(255,255,255,.09)",
+    borderRadius: "12px",
+    background: "#141416",
+    boxShadow: selected ? "0 0 0 1px rgba(189,147,107,.12)" : "none"
+  };
+
+  const coverStyle = {
+    position: "relative",
+    minHeight: compact ? "104px" : "145px",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    padding: "14px",
+    cursor: onSelect ? "pointer" : "default",
+    background: `radial-gradient(circle at 75% 20%, ${light} 0, transparent 42%), linear-gradient(135deg, ${dark}, #101013 82%)`
+  };
+
+  return (
+    <article style={cardStyle}>
+      <div
+        style={coverStyle}
+        onClick={onSelect || undefined}
+        role={onSelect ? "button" : undefined}
+        tabIndex={onSelect ? 0 : undefined}
+        onKeyDown={onSelect ? (event) => {
+          if (event.key === "Enter" || event.key === " ") onSelect();
+        } : undefined}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "10px", letterSpacing: "2px", color: "rgba(255,255,255,.72)" }}>
+            OUR CINEMA
+          </span>
+          {selected && (
+            <span style={{
+              fontSize: "9px",
+              padding: "4px 7px",
+              borderRadius: "20px",
+              background: "#bd936b",
+              color: "#171310",
+              fontWeight: 800
+            }}>
+              СЕЙЧАС СМОТРИТЕ
+            </span>
+          )}
+        </div>
+
+        <div style={{ textAlign: "center", textShadow: "0 3px 18px rgba(0,0,0,.45)" }}>
+          <div style={{ fontSize: compact ? "28px" : "36px", lineHeight: 1 }}>▶</div>
+          <div style={{ marginTop: "10px", fontSize: "10px", letterSpacing: "3px", color: "rgba(255,255,255,.7)" }}>
+            YOUR PRIVATE CINEMA
+          </div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: "8px" }}>
+          <span style={{ fontSize: "9px", letterSpacing: "1.5px", color: "rgba(255,255,255,.62)" }}>
+            VIDEO COLLECTION
+          </span>
+          <span style={{ fontSize: "10px", color: "rgba(255,255,255,.7)" }}>▶ PLAY</span>
+        </div>
+      </div>
+
+      <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "9px" }}>
+        <div
+          title={video.name}
+          style={{
+            fontSize: "13px",
+            fontWeight: 700,
+            lineHeight: 1.4,
+            overflow: "hidden",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            minHeight: "36px",
+            overflowWrap: "anywhere"
+          }}
+        >
+          {video.name}
+        </div>
+
+        <div style={{ color: "#999", fontSize: "11px" }}>
+          {video.sizeLabel || "Видео"}
+        </div>
+
+        <div style={{ display: "flex", gap: "7px" }}>
+          {onSelect && (
+            <button
+              onClick={onSelect}
+              style={{
+                flex: 1,
+                border: 0,
+                borderRadius: "7px",
+                padding: "9px 10px",
+                background: "#bd936b",
+                color: "#171310",
+                fontWeight: 800,
+                cursor: "pointer",
+                fontSize: "11px"
+              }}
+            >
+              Смотреть
+            </button>
+          )}
+
+          {onDelete && (
+            <button
+              onClick={onDelete}
+              style={{
+                border: "1px solid #713b3b",
+                borderRadius: "7px",
+                padding: "8px 10px",
+                background: "transparent",
+                color: "#ff8585",
+                cursor: "pointer",
+                fontSize: "11px"
+              }}
+            >
+              Удалить
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function App() {
   const [modal, setModal] = useState("");
   const [roomCode, setRoomCode] = useState("");
   const [userName, setUserName] = useState(() => localStorage.getItem("ourCinemaName") || "");
   const [roomUsers, setRoomUsers] = useState([]);
   const [activeRoomCode, setActiveRoomCode] = useState("");
+  const [isRoomOwner, setIsRoomOwner] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -19,7 +169,6 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [episode, setEpisode] = useState("1");
   const [videoUrl, setVideoUrl] = useState("");
   const [videoName, setVideoName] = useState("");
   const [videoError, setVideoError] = useState("");
@@ -32,12 +181,45 @@ function App() {
   const videoRef = useRef(null);
   const fileInputRef = useRef(null);
   const pendingPlaybackRef = useRef(null);
+  const isApplyingRemoteRef = useRef(false);
 
   useEffect(() => {
     const socket = io(SERVER_URL);
     socketRef.current = socket;
 
-    socket.on("connect", () => setConnected(true));
+    socket.on("connect", () => {
+      setConnected(true);
+
+      const savedRoomCode = localStorage.getItem("ourCinemaRoomCode");
+      const savedName = localStorage.getItem("ourCinemaName") || "Гость";
+      const savedOwnerToken = savedRoomCode
+        ? localStorage.getItem(`ourCinemaOwnerToken:${savedRoomCode}`)
+        : null;
+
+      if (savedRoomCode) {
+        socket.emit("join-room", savedRoomCode, {
+          name: savedName,
+          ownerToken: savedOwnerToken
+        }, (response) => {
+          if (response?.success) {
+            openRoom(
+              response.roomCode,
+              response.playback,
+              response.users,
+              response.currentVideo,
+              response.messages,
+              response.isOwner
+            );
+          } else {
+            localStorage.removeItem("ourCinemaRoomCode");
+            setActiveRoomCode("");
+            setIsRoomOwner(false);
+            setError("Предыдущая комната уже недоступна. Создай новую или введи другой код.");
+          }
+        });
+      }
+    });
+
     socket.on("disconnect", () => setConnected(false));
 
     socket.on("connect_error", () => {
@@ -60,14 +242,23 @@ function App() {
       setCurrentTime(0);
       setDuration(0);
       setIsPlaying(false);
+
       pendingPlaybackRef.current = {
         isPlaying: false,
-        currentTime: 0,
-        episode
+        currentTime: 0
       };
 
       if (videoRef.current) {
+        isApplyingRemoteRef.current = true;
         videoRef.current.pause();
+
+        try {
+          videoRef.current.currentTime = 0;
+        } catch {
+          // Видео ещё может загружаться.
+        }
+
+        isApplyingRemoteRef.current = false;
       }
     });
 
@@ -76,16 +267,14 @@ function App() {
     });
 
     socket.on("playback-update", (data) => {
+      if (!data || typeof data !== "object") return;
+
       if (typeof data.isPlaying === "boolean") {
         setIsPlaying(data.isPlaying);
       }
 
       if (typeof data.currentTime === "number") {
         setCurrentTime(data.currentTime);
-      }
-
-      if (data.episode !== undefined) {
-        setEpisode(String(data.episode));
       }
 
       pendingPlaybackRef.current = data;
@@ -121,22 +310,44 @@ function App() {
 
   function applyRemotePlayback(data) {
     const video = videoRef.current;
-
     if (!video || video.readyState < 1) return;
+
+    isApplyingRemoteRef.current = true;
 
     if (typeof data.currentTime === "number") {
       if (Math.abs(video.currentTime - data.currentTime) > 1.2) {
-        video.currentTime = data.currentTime;
+        try {
+          video.currentTime = data.currentTime;
+        } catch {
+          // Браузер может временно не разрешить перемотку.
+        }
       }
     }
 
-    if (data.isPlaying) {
-      video.play().catch(() => {
-        setVideoError("Нажми кнопку воспроизведения, чтобы запустить видео.");
-      });
-    } else {
-      video.pause();
+    if (typeof data.isPlaying === "boolean") {
+      if (data.isPlaying && video.paused) {
+        video.play().catch(() => {
+          setVideoError("Браузер заблокировал автозапуск. Попробуй обновить страницу и нажать «Разрешить просмотр».");
+        }).finally(() => {
+          isApplyingRemoteRef.current = false;
+        });
+        return;
+      }
+
+      if (!data.isPlaying && !video.paused) {
+        video.pause();
+      }
     }
+
+    isApplyingRemoteRef.current = false;
+  }
+
+  function makeOwnerToken() {
+    if (window.crypto?.randomUUID) {
+      return window.crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
 
   function createRoom() {
@@ -158,8 +369,9 @@ function App() {
     }
 
     setLoading(true);
+    const ownerToken = makeOwnerToken();
 
-    socket.emit("create-room", { name: cleanName }, (response) => {
+    socket.emit("create-room", { name: cleanName, ownerToken }, (response) => {
       setLoading(false);
 
       if (!response?.success) {
@@ -168,7 +380,17 @@ function App() {
         return;
       }
 
-      openRoom(response.roomCode, null, response.users, response.currentVideo);
+      localStorage.setItem(`ourCinemaOwnerToken:${response.roomCode}`, ownerToken);
+
+      openRoom(
+        response.roomCode,
+        null,
+        response.users,
+        response.currentVideo,
+        response.messages,
+        true
+      );
+
       setModal("");
     });
   }
@@ -198,7 +420,12 @@ function App() {
 
     setLoading(true);
 
-    socket.emit("join-room", code, { name: cleanName }, (response) => {
+    const ownerToken = localStorage.getItem(`ourCinemaOwnerToken:${code}`);
+
+    socket.emit("join-room", code, {
+      name: cleanName,
+      ownerToken
+    }, (response) => {
       setLoading(false);
 
       if (!response?.success) {
@@ -206,15 +433,25 @@ function App() {
         return;
       }
 
-      openRoom(response.roomCode, response.playback, response.users, response.currentVideo);
+      openRoom(
+        response.roomCode,
+        response.playback,
+        response.users,
+        response.currentVideo,
+        response.messages,
+        response.isOwner
+      );
+
       setRoomCode("");
       setModal("");
     });
   }
 
-  function openRoom(code, playback, users = [], currentVideo = null) {
+  function openRoom(code, playback, users = [], currentVideo = null, roomMessages = [], owner = false) {
     setActiveRoomCode(code);
-    setMessages([]);
+    setIsRoomOwner(Boolean(owner));
+    localStorage.setItem("ourCinemaRoomCode", code);
+    setMessages(Array.isArray(roomMessages) ? roomMessages : []);
     setRoomUsers(Array.isArray(users) ? users : []);
     setVideoUrl(currentVideo ? `${SERVER_URL}${currentVideo.url}` : "");
     setVideoName(currentVideo?.name || "");
@@ -222,14 +459,11 @@ function App() {
 
     const initialPlayback = playback || {
       isPlaying: false,
-      currentTime: 0,
-      episode: 1
+      currentTime: 0
     };
 
-    setIsPlaying(initialPlayback.isPlaying || false);
+    setIsPlaying(Boolean(initialPlayback.isPlaying));
     setCurrentTime(initialPlayback.currentTime || 0);
-    setEpisode(String(initialPlayback.episode || 1));
-
     pendingPlaybackRef.current = initialPlayback;
   }
 
@@ -269,19 +503,21 @@ function App() {
         ...old.filter((item) => item.id !== data.video.id)
       ]);
 
-      if (activeRoomCode) {
+      if (activeRoomCode && isRoomOwner) {
         selectLibraryVideo(data.video);
       }
     } catch (uploadError) {
-      const message = uploadError.message || "Ошибка загрузки видео.";
-      setLibraryError(message);
-      setVideoError(message);
+      const errorMessage = uploadError.message || "Ошибка загрузки видео.";
+      setLibraryError(errorMessage);
+      setVideoError(errorMessage);
     } finally {
       setUploading(false);
     }
   }
 
   async function deleteVideo(video) {
+    if (activeRoomCode && !isRoomOwner) return;
+
     const confirmed = window.confirm(
       `Удалить видео "${video.name}"?\n\nФайл будет полностью удалён с сервера.`
     );
@@ -302,15 +538,18 @@ function App() {
         throw new Error(data.message || "Не удалось удалить видео.");
       }
 
-      setLibraryVideos((old) =>
-        old.filter((item) => item.id !== video.id)
-      );
+      setLibraryVideos((old) => old.filter((item) => item.id !== video.id));
     } catch (deleteError) {
       setLibraryError(deleteError.message || "Ошибка удаления видео.");
     }
   }
 
   function selectLibraryVideo(video) {
+    if (!isRoomOwner) {
+      setVideoError("Выбирать видео может только создатель комнаты.");
+      return;
+    }
+
     if (!video || !socketRef.current?.connected) {
       setVideoError("Нет соединения с сервером.");
       return;
@@ -325,19 +564,19 @@ function App() {
 
   function handleVideoLoaded() {
     const video = videoRef.current;
-
     if (!video) return;
 
     setDuration(Number.isFinite(video.duration) ? video.duration : 0);
 
     const pending = pendingPlaybackRef.current;
-
     if (pending) {
       applyRemotePlayback(pending);
     }
   }
 
   async function togglePlayback() {
+    if (!isRoomOwner) return;
+
     const video = videoRef.current;
 
     if (!videoUrl || !video) {
@@ -352,11 +591,9 @@ function App() {
         await video.play();
 
         setIsPlaying(true);
-
         updatePlayback({
           isPlaying: true,
-          currentTime: video.currentTime,
-          episode
+          currentTime: video.currentTime
         });
       } catch {
         setVideoError("Не удалось запустить видео.");
@@ -365,65 +602,50 @@ function App() {
       video.pause();
 
       setIsPlaying(false);
-
       updatePlayback({
         isPlaying: false,
-        currentTime: video.currentTime,
-        episode
+        currentTime: video.currentTime
       });
     }
   }
 
   function seekVideo(value) {
+    if (!isRoomOwner) return;
+
     const time = Number(value);
     const video = videoRef.current;
 
-    if (!video || !videoUrl) return;
+    if (!video || !videoUrl || !Number.isFinite(time)) return;
 
-    video.currentTime = time;
+    try {
+      video.currentTime = time;
+    } catch {
+      setVideoError("Не удалось перемотать видео.");
+      return;
+    }
+
     setCurrentTime(time);
 
     updatePlayback({
       currentTime: time,
-      isPlaying: !video.paused,
-      episode
+      isPlaying: !video.paused
     });
   }
 
   function handleTimeUpdate() {
     const video = videoRef.current;
-
-    if (video) {
-      setCurrentTime(video.currentTime);
-    }
-  }
-
-  function changeEpisode(value) {
-    setEpisode(value);
-    setCurrentTime(0);
-    setIsPlaying(false);
-
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.currentTime = 0;
-    }
-
-    updatePlayback({
-      episode: value,
-      currentTime: 0,
-      isPlaying: false
-    });
+    if (video) setCurrentTime(video.currentTime);
   }
 
   function updatePlayback(data) {
-    socketRef.current?.emit("playback-update", data);
+    if (!isRoomOwner || !socketRef.current?.connected) return;
+    socketRef.current.emit("playback-update", data);
   }
 
   function sendMessage(event) {
     event.preventDefault();
 
     const cleanMessage = message.trim();
-
     if (!cleanMessage || !socketRef.current?.connected) return;
 
     socketRef.current.emit("chat-message", cleanMessage);
@@ -475,6 +697,11 @@ function App() {
               <div>
                 <span className="section-label">YOUR PRIVATE ROOM</span>
                 <h1>Совместный просмотр</h1>
+                {isRoomOwner && (
+                  <span style={{ color: "#bd936b", fontSize: "12px" }}>
+                    Вы создатель комнаты — у вас есть управление
+                  </span>
+                )}
               </div>
 
               <div className="room-users">
@@ -503,11 +730,12 @@ function App() {
                   onLoadedMetadata={handleVideoLoaded}
                   onTimeUpdate={handleTimeUpdate}
                   onEnded={() => {
+                    if (!isRoomOwner) return;
+
                     setIsPlaying(false);
                     updatePlayback({
                       isPlaying: false,
-                      currentTime: duration,
-                      episode
+                      currentTime: duration
                     });
                   }}
                   style={{
@@ -554,13 +782,15 @@ function App() {
                   </div>
                 </div>
 
-                <button
-                  className="secondary-button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                >
-                  {uploading ? "Загрузка..." : "Загрузить видео"}
-                </button>
+                {isRoomOwner && (
+                  <button
+                    className="secondary-button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading}
+                  >
+                    {uploading ? "Загрузка..." : "Загрузить видео"}
+                  </button>
+                )}
               </div>
 
               {videoError && (
@@ -570,7 +800,13 @@ function App() {
               )}
 
               <div className="player-controls">
-                <button className="play-button" onClick={togglePlayback}>
+                <button
+                  className="play-button"
+                  onClick={togglePlayback}
+                  disabled={!isRoomOwner || !videoUrl}
+                  title={isRoomOwner ? "Воспроизведение / пауза" : "Управляет создатель комнаты"}
+                  style={!isRoomOwner ? { opacity: 0.45, cursor: "not-allowed" } : undefined}
+                >
                   {isPlaying ? "Ⅱ" : "▶"}
                 </button>
 
@@ -586,13 +822,20 @@ function App() {
                   step="0.1"
                   value={Math.min(currentTime, duration || 1)}
                   onChange={(event) => seekVideo(event.target.value)}
-                  disabled={!videoUrl}
+                  disabled={!isRoomOwner || !videoUrl}
+                  title={isRoomOwner ? "Перемотка видео" : "Перематывать может только создатель комнаты"}
                 />
 
                 <span className="player-time">
                   {formatTime(duration)}
                 </span>
               </div>
+
+              {!isRoomOwner && (
+                <p style={{ color: "#bd936b", fontSize: "12px", textAlign: "center", padding: "0 12px 12px" }}>
+                  Управление просмотром и выбор видео доступны создателю комнаты
+                </p>
+              )}
             </div>
 
             <input
@@ -614,36 +857,21 @@ function App() {
               </div>
 
               {libraryVideos.length > 0 ? (
-                <div className="room-library-list">
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                  gap: "12px",
+                  marginTop: "16px"
+                }}>
                   {libraryVideos.map((video) => (
-                    <div className="library-video-item" key={video.id}>
-                      <span className="library-video-icon">▶</span>
-
-                      <span className="library-video-name">
-                        {video.name}
-                      </span>
-
-                      <button
-                        className="library-video-action"
-                        onClick={() => selectLibraryVideo(video)}
-                      >
-                        Выбрать
-                      </button>
-
-                      <button
-                        onClick={() => deleteVideo(video)}
-                        style={{
-                          background: "transparent",
-                          border: "1px solid #713b3b",
-                          color: "#ff7777",
-                          padding: "7px 10px",
-                          borderRadius: "6px",
-                          cursor: "pointer"
-                        }}
-                      >
-                        Удалить
-                      </button>
-                    </div>
+                    <VideoCard
+                      key={video.id}
+                      video={video}
+                      selected={video.name === videoName}
+                      onSelect={isRoomOwner ? () => selectLibraryVideo(video) : undefined}
+                      onDelete={isRoomOwner ? () => deleteVideo(video) : undefined}
+                      compact
+                    />
                   ))}
                 </div>
               ) : (
@@ -655,30 +883,6 @@ function App() {
               {libraryError && (
                 <p className="library-error">{libraryError}</p>
               )}
-            </div>
-
-            <div className="episode-panel">
-              <div>
-                <span className="section-label">NOW WATCHING</span>
-                <h2>Бесстыжие</h2>
-                <p>Выберите эпизод для совместного просмотра</p>
-              </div>
-
-              <div className="episode-select">
-                <label htmlFor="episode">Серия</label>
-
-                <select
-                  id="episode"
-                  value={episode}
-                  onChange={(event) => changeEpisode(event.target.value)}
-                >
-                  {Array.from({ length: 12 }, (_, index) => (
-                    <option key={index + 1} value={String(index + 1)}>
-                      Серия {index + 1}
-                    </option>
-                  ))}
-                </select>
-              </div>
             </div>
 
             <div className="room-note">
@@ -715,7 +919,6 @@ function App() {
                   <div className="message-content">
                     <div className="message-meta">
                       <strong>{item.name || "Гость"}</strong>
-
                       <span>
                         {item.time
                           ? new Date(item.time).toLocaleTimeString([], {
@@ -840,13 +1043,13 @@ function App() {
               <div className="poster-top">OUR CINEMA ORIGINAL</div>
 
               <div className="poster-main">
-                <span>SHAME</span>
-                <span>LESS</span>
+                <span>OUR</span>
+                <span>CINEMA</span>
               </div>
 
               <div className="poster-bottom">
-                <span>СЕРИАЛ В НАШЕЙ БИБЛИОТЕКЕ</span>
-                <strong>БЕСТЫЖИЕ</strong>
+                <span>YOUR PRIVATE COLLECTION</span>
+                <strong>СМОТРИМ ВМЕСТЕ</strong>
               </div>
 
               <div className="poster-number">01</div>
@@ -892,65 +1095,21 @@ function App() {
           )}
 
           {libraryVideos.length > 0 && (
-            <div className="home-video-library">
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
+              gap: "16px",
+              marginTop: "22px"
+            }}>
               {libraryVideos.map((video) => (
-                <div className="home-video-item" key={video.id}>
-                  <span className="home-video-icon">▶</span>
-
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <strong>{video.name}</strong>
-                    <small>{video.sizeLabel}</small>
-                  </div>
-
-                  <button
-                    onClick={() => deleteVideo(video)}
-                    style={{
-                      background: "transparent",
-                      border: "1px solid #713b3b",
-                      color: "#ff7777",
-                      padding: "7px 10px",
-                      borderRadius: "6px",
-                      cursor: "pointer",
-                      flexShrink: 0
-                    }}
-                  >
-                    Удалить
-                  </button>
-                </div>
+                <VideoCard
+                  key={video.id}
+                  video={video}
+                  onDelete={() => deleteVideo(video)}
+                />
               ))}
             </div>
           )}
-
-          <div className="series-card">
-            <div className="series-cover">
-              <div className="cover-decoration">S</div>
-              <div className="cover-title">SHAMELESS</div>
-              <div className="cover-subtitle">БЕСТЫЖИЕ</div>
-            </div>
-
-            <div className="series-details">
-              <span className="series-tag">НАША КОЛЛЕКЦИЯ</span>
-              <h3>Бесстыжие</h3>
-
-              <div className="series-meta">
-                <span>2011–2021</span>
-                <span>•</span>
-                <span>Комедия / Драма</span>
-              </div>
-
-              <p>
-                История большой семьи Галлагеров,
-                их жизни, приключений и непростых отношений.
-              </p>
-
-              <button
-                className="watch-button"
-                onClick={() => setModal("series")}
-              >
-                Смотреть сериал <span>→</span>
-              </button>
-            </div>
-          </div>
         </section>
 
         <section className="bottom-section" id="about">
@@ -1024,9 +1183,7 @@ function App() {
 
                 <input
                   value={roomCode}
-                  onChange={(event) =>
-                    setRoomCode(event.target.value.toUpperCase())
-                  }
+                  onChange={(event) => setRoomCode(event.target.value.toUpperCase())}
                   placeholder="Например, A7K92B"
                   maxLength={6}
                 />
@@ -1049,29 +1206,7 @@ function App() {
                 <h2>Ошибка подключения</h2>
                 <p>{error}</p>
 
-                <button
-                  className="primary-button modal-button"
-                  onClick={closeModal}
-                >
-                  Понятно
-                </button>
-              </>
-            )}
-
-            {modal === "series" && (
-              <>
-                <div className="modal-icon">▶</div>
-                <h2>Бесстыжие</h2>
-                <p>
-                  Добавь видеофайл, на который у тебя есть права,
-                  в раздел «Моя видеотека». Для сериалов можно
-                  подключать только легальные источники воспроизведения.
-                </p>
-
-                <button
-                  className="primary-button modal-button"
-                  onClick={closeModal}
-                >
+                <button className="primary-button modal-button" onClick={closeModal}>
                   Понятно
                 </button>
               </>
